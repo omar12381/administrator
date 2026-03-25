@@ -1,0 +1,372 @@
+## 1. Project Overview (architecture, tech stack, purpose)
+- Context:
+  - This repository is a full-stack app combining a Python FastAPI backend with a Flutter (Dart) frontend.
+  - Purpose is to manage users/roles and manage forest/parcel polygons stored as GeoJSON (frontend) and PostGIS geometry (backend).
+  - Backend is under `app/`; frontend is under `user_forest_app/`.
+- Findings:
+  - Backend uses FastAPI with routers for `users`, `forests`, `parcelles`, `roles`, `directions-regionales`, and `directions-secondaires`.
+  - Backend uses SQLAlchemy ORM + PostGIS (`geoalchemy2.Geometry`) and geometry conversion via `app/geo_utils.py` using Shapely.
+  - Frontend uses `flutter_map` with OSM tiles and implements polygon drawing via tap-to-point and polygon rendering via `PolygonLayer`.
+  - Data exchanged for geometries is GeoJSON `Polygon` (frontend sends `{"type":"Polygon","coordinates":[...]}`; backend returns `geometry` as GeoJSON).
+- Issues:
+  - No authentication/authorization layer exists beyond storing hashed passwords and roles; API endpoints are effectively open (CORS also permissive).
+  - App-level schema alignment is partial: backend supports additional fields (`surface_ha`, `type_foret`, direction linking), but some UI flows never send them.
+  - Geometry validation is split across frontend (heuristics) and backend (PostGIS + Shapely) and may not match perfectly.
+- Improvements:
+  - Add auth (e.g., JWT) and enforce role-based permissions at router level (especially for CRUD on users and geo objects).
+  - Define a strict API contract for geometry payloads and required fields per endpoint; update UI to send supported fields or remove unused schema fields.
+  - Align frontend and backend validation logic (or centralize validation in backend and treat frontend checks as “UX only”).
+
+## 2. Backend Analysis (APIs, data models, security, errors)
+- Context:
+  - Backend is implemented with FastAPI (`app/main.py`) and SQLAlchemy models (`app/models.py`), with Pydantic schemas (`app/schemas.py`) and routers in `app/routers/`.
+  - API exposes CRUD endpoints for users, forests, parcelles, roles, and directions.
+- Findings:
+  - Startup (`app/main.py`) runs `Base.metadata.create_all(bind=engine)` and inserts default roles if `roles` is empty; also runs `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...` for legacy databases.
+  - CORS middleware allows all origins (`allow_origins=["*"]`) and all methods/headers in dev.
+  - Users:
+    - `POST /users/` validates uniqueness of `email` and `username` via ORM queries; hashes passwords with `passlib` (`pbkdf2_sha256`).
+    - `GET /users/`, `GET /users/{user_id}`, `PUT /users/{user_id}`, `DELETE /users/{user_id}`.
+    - `GET /users/superviseurs` filters users by role name `"superviseur"`.
+  - Forests:
+    - `POST /forests/` converts GeoJSON to PostGIS geometry and rejects any intersecting forests using `models.Forest.geom.ST_Intersects(geom)`.
+    - `GET /forests/`, `GET /forests/{forest_id}`, `PUT /forests/{forest_id}`, `DELETE /forests/{forest_id}`.
+    - Geometry is always returned as GeoJSON via `geometry_to_geojson(forest.geom)`.
+  - Parcelles:
+    - `POST /parcelles/` enforces:
+      - Parent existence (`forest_id` must exist).
+      - Parcelle must be contained in parent via `models.Forest.geom.ST_Contains(geom)`.
+      - Parcelle must not touch/overlap other parcelles in the same forest via `~models.Parcelle.geom.ST_Disjoint(geom)`.
+    - `GET /parcelles/`, `GET /parcelles/by_forest/{forest_id}`, `GET /parcelles/{parcelle_id}`.
+    - `PUT /parcelles/{parcelle_id}` validates containment in parent using Shapely `within()`, recalculates `surface_ha`, and updates `geom`.
+    - `DELETE /parcelles/{parcelle_id}` deletes by id.
+  - Geometry conversion:
+    - `app/geo_utils.py` converts GeoJSON/Feature to Shapely shape then to PostGIS with `from_shape(..., srid=4326)`.
+    - PostGIS geometry is converted back to GeoJSON dict using Shapely `mapping(to_shape(geom))`.
+- Security:
+  - Passwords are stored as hashes but there is no login/token verification in the API; any client can call CRUD endpoints.
+  - CORS is wide-open (`*`), increasing exposure for browser-based clients.
+  - Role fields exist but permissions are not enforced in router logic.
+- Errors & robustness:
+  - Most routes raise `HTTPException` with plain string `detail` messages.
+  - Parcelle create wraps most logic in a try/catch and returns `500` with `detail=f"Erreur: {str(e)}"`.
+  - Some SQLAlchemy usage is legacy (`db.query(...).get(id)`), which can emit warnings and may behave differently depending on SQLAlchemy version.
+- Issues:
+  - Missing auth/authz: password hashing exists but is unused for request authentication.
+  - `PUT /forests/{id}` does not re-check intersection/overlap constraints against other forests.
+  - `PUT /parcelles/{id}` does not check disjointness against other parcelles (only containment in parent), enabling overlaps after updates.
+  - Geometry schema is permissive (`geometry: Dict[str, Any]`) and does not validate polygon structure, closure, or geometry type server-side.
+  - `requirements.txt` does not list `email-validator` though schemas use `EmailStr` (may cause runtime dependency resolution issues depending on environment).
+  - `geo_utils.py` uses Shapely conversions without explicit geometry validity checks; self-intersecting polygons can break area computations and spatial predicates.
+- Improvements:
+  - Implement auth (JWT or session) and enforce role checks for each router method.
+  - Add server-side validation for:
+    - GeoJSON type must be `Polygon` (and optionally `Feature` wrapping).
+    - Ring closure and coordinate array structure.
+    - Geometry validity (e.g., Shapely `is_valid`).
+  - Enforce invariants in update endpoints:
+    - Re-run forest intersection checks on `PUT /forests/{id}`.
+    - Re-run parcelle disjointness checks within forest on `PUT /parcelles/{id}`.
+  - Improve error handling:
+    - Map common exceptions to 4xx (validation) vs 5xx (internal).
+    - Avoid returning raw exception strings in production responses.
+  - Replace deprecated SQLAlchemy patterns with supported methods (`db.get(Model, id)`).
+
+## 3. Frontend Analysis (UI/UX, state management, code quality)
+- Context:
+  - Frontend is a Flutter app (`user_forest_app/`) using StatefulWidgets and the `flutter_map` package for map rendering and drawing.
+  - It calls the backend via HTTP services in `user_forest_app/lib/services/`.
+- Findings:
+  - Navigation is route-based in `main.dart`:
+    - `/users` → `UserManagementScreen`
+    - `/forests/add` → `AddForestScreen`
+    - `/forests/list` → `ForestListScreen`
+  - Data loading and UI state are managed locally per screen via booleans (`_isLoading`, `_errorMessage`, etc.) and `setState()`.
+  - Services wrap HTTP calls:
+    - `ForestService` calls `/forests/` CRUD endpoints.
+    - `UserService` calls `/users/` endpoints including `/users/superviseurs`.
+    - `ParcelleService` calls `/parcelles/` endpoints including `/parcelles/by_forest/{forestId}`.
+  - Error handling is user-facing:
+    - Most operations show `SnackBar` messages with stringified exceptions.
+  - UI flow for forests:
+    - `AddForestScreen` requires name + polygon with at least 3 points.
+    - It draws a polygon and prevents saving if polygon overlaps existing forests (client-side heuristic).
+  - UI flow for parcelles:
+    - `ParcelleScreen` loads existing parcelles for a forest and allows drawing multiple new parcelle polygons, naming each before saving “all”.
+    - It shows colored polygons for existing parcelles and color-coded validation for current drawn polygon.
+    - It supports editing and deleting parcelles via dialogs and list menu actions.
+- Issues:
+  - State management is purely local (`setState()`), which increases complexity as flows grow (e.g., parcelle editing + multi-draw + multiple controllers).
+  - Some potential UX gaps:
+    - Polygon validity feedback is heuristic and not guaranteed to match backend rules.
+    - Users can enter invalid geometry coordinate orders (backend may reject).
+  - Resource management risks:
+    - Controllers for dynamically created parcelle forms are created and disposed manually; correctness depends on all lifecycle paths.
+  - API errors are surfaced as raw exception text, which may leak backend details and create poor user messages.
+- Improvements:
+  - Introduce a small state layer (e.g., Provider/Riverpod) to reduce prop-drilling and simplify async state handling.
+  - Harmonize validation messaging:
+    - Clearly separate “client-side heuristic check” vs “backend validation failure”.
+    - Display backend validation detail when available.
+  - Improve error parsing:
+    - If backend returns JSON error bodies, show user-friendly messages instead of raw `Exception.toString()`.
+  - Review controller lifecycle in `ParcelleScreen` to ensure no memory leaks and correct disposal for edit/new modes.
+
+## 4. Map & Geo Features (GeoJSON handling, validation, performance)
+- Context:
+  - Map rendering and drawing is done on the client using `flutter_map` and GeoJSON `Polygon`.
+  - Backend stores geometries as PostGIS `Geometry(POLYGON, srid=4326)` and uses PostGIS/ Shapely for checks and conversions.
+- Findings:
+  - Frontend GeoJSON handling:
+    - Forest:
+      - Converts stored GeoJSON polygon coordinates into `List<LatLng>` by expecting `geometry['type'] == 'Polygon'` and using `geometry['coordinates'][0]` as the ring.
+      - Builds GeoJSON polygon by using tapped points `[lng, lat]` and closing the ring by appending the first coordinate if missing.
+    - Parcelles:
+      - Similar conversion approach via `_extractLatLngFromGeometry()` and `_buildGeoJsonPolygon()` (also closes ring).
+  - Frontend validation heuristics:
+    - Forest overlap prevention:
+      - Uses bounding box overlap detection (`LatLngBounds`) and then point-in-polygon checks using ray casting.
+    - Parcelle overlap prevention:
+      - Verifies all drawn points lie inside the parent forest polygon (point-in-polygon).
+      - Checks overlap/touching between drawn polygon and existing parcelles using:
+        - bounding boxes with epsilon margin
+        - point-in-polygon tests against existing polygons
+        - edge “touch” approximation via minimum distances between polygon edge endpoints.
+    - Tunisia bounds:
+      - Both forest and parcelle drawing disallow taps outside a predefined Tunisia bounding box.
+  - Backend geometry checks:
+    - Forest creation rejects any intersecting forest geometry using `ST_Intersects`.
+    - Parcelle creation enforces containment with `ST_Contains` and non-overlap/touching with `~ST_Disjoint`.
+    - Parcelle update now revalidates containment in parent forest and enforces non-overlap/non-touch against other parcelles (excluding itself).
+  - Surface calculation:
+    - Parcelle surface is computed from Shapely planar polygon area in “degree units” using an approximation:
+      - `surface_ha = area_deg * (111320 * 111320) / 10000`.
+    - Forest surface is stored but is not computed server-side during creation/update.
+- Issues:
+  - Coordinate units / geodesic accuracy:
+    - Area approximation assumes small areas and uses a degrees-to-meters constant without projection transformation; large polygons or varying latitude can produce significant error.
+  - Frontend and backend validation mismatch:
+    - Frontend overlap logic is heuristic and does not call PostGIS; backend uses spatial predicates (`ST_Contains`, `ST_Disjoint`) that can disagree near boundaries or for invalid geometries.
+  - Backend update invariants:
+    - `PUT /parcelles/{id}` now also enforces non-overlap/non-touch constraints with other parcelles in the same forest.
+  - Geometry type validation:
+    - Backend validates GeoJSON `Polygon` (or Feature wrapper), checks ring closure/structure, and rejects invalid/self-intersecting polygons with HTTP 400 + clear messages.
+  - Performance:
+    - Converting geometries from PostGIS to GeoJSON for list endpoints can be expensive for many objects.
+    - Frontend overlap checks run multiple nested loops across points and polygon rings (potentially heavy for large polygons).
+- Improvements:
+  - Centralize geometry validation in the backend:
+    - Validate GeoJSON structure and geometry validity before spatial checks.
+  - Ensure update invariants:
+    - Implemented `ST_Disjoint` checks when updating parcelles to prevent overlap/touching.
+  - Improve area accuracy:
+    - Consider using PostGIS for area computation in meters (e.g., transform to a projected CRS or use geography-based calculations).
+  - Improve performance:
+    - Implemented pagination (`skip/limit`) and summary endpoints for forests/parcelles; extend if needed for other list views.
+    - Implemented GIST spatial indexes; tune further based on dataset size and query patterns.
+  - Add frontend/back-end alignment:
+    - Treat frontend checks as UX only; rely on backend as the source of truth for final validation.
+
+## 5. Database Design (schema, relations, constraints, missing parts)
+- Context:
+  - Database schema is defined by SQLAlchemy models in `app/models.py` and created on startup via `Base.metadata.create_all(...)`.
+  - Geometry columns use PostGIS via `geoalchemy2.Geometry`.
+- Findings:
+  - Core tables and relations:
+    - `roles`:
+      - `id` PK, `name` unique not null.
+    - `users`:
+      - `id` PK, `username` unique, `email` unique, `hashed_password`.
+      - `role_id` FK → `roles.id` (required).
+      - `direction_secondaire_id` FK → `direction_secondaire.id` (nullable, indexed).
+      - `telephone` nullable, `actif` boolean default true.
+    - `direction_regionale`:
+      - `id` PK, `nom` unique, `gouvernorat`.
+    - `direction_secondaire`:
+      - `id` PK, `nom`, `region_id` FK → `direction_regionale.id` (indexed).
+    - `forests`:
+      - `id` PK, `name`, `description` nullable.
+      - `geom` Geometry(POLYGON, 4326) not null.
+      - `created_by_id` FK → `users.id` (nullable).
+      - `direction_secondaire_id` FK → `direction_secondaire.id` (nullable, indexed).
+      - `surface_ha` nullable float, `type_foret` nullable string.
+      - `parcelles` relationship with cascade `all, delete-orphan`.
+    - `parcelles`:
+      - `id` PK, `forest_id` FK → `forests.id` (not null, indexed).
+      - `name` not null, `description` nullable.
+      - `geom` Geometry(POLYGON, 4326) not null.
+      - `surface_ha` nullable float.
+      - `created_by_id` FK → `users.id` nullable.
+      - Relationship: `parcelle.forest`.
+  - Cascades:
+    - Deleting a `Forest` should delete its `Parcelle` rows via SQLAlchemy cascade `cascade="all, delete-orphan"` on the ORM relationship.
+  - Uniqueness constraints:
+    - Uniqueness exists for `roles.name`, `users.username`, `users.email`.
+- Issues:
+  - Missing constraints/invariants:
+    - No database-level constraints to ensure parcelles are disjoint/contained within parent forests; these are enforced only in create/update logic.
+    - No explicit spatial constraints (CHECKs) to ensure polygon validity or type correctness.
+  - Spatial indexes:
+    - GIST spatial indexes are now added for `forests.geom` and `parcelles.geom`, accelerating `ST_Intersects`, `ST_Contains`, and `ST_Disjoint` queries.
+  - Schema drift risk:
+    - Startup uses `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...` but the ORM models already define those columns; if geometry models change over time, migrations are not formalized.
+  - Incomplete API-return alignment:
+    - `ForestRead` schema includes `direction_secondaire_id`, `surface_ha`, `type_foret`, but not `created_by_id`; however the model includes `created_by_id`.
+    - `ForestCreate` schema supports `surface_ha` and `type_foret`, but frontend `AddForestScreen` does not send them; data may remain null.
+- Improvements:
+  - Add migrations:
+    - Use Alembic (or equivalent) to manage schema changes rather than runtime `ALTER TABLE`.
+  - Spatial indexes:
+    - Implemented (GIST on `forests.geom` and `parcelles.geom`).
+  - Add validation strategy consistency:
+    - Keep spatial invariants in backend, but consider database triggers or constraints if invariants are critical.
+  - Improve API/schema alignment:
+    - Decide whether to expose `created_by_id` in `ForestRead` and update frontend accordingly.
+
+## 6. Code Quality (duplication, structure, naming, maintainability)
+- Context:
+  - Backend is organized in routers and shared utilities (`geo_utils.py`).
+  - Frontend has separate screen widgets and service classes.
+- Findings:
+  - Backend structure:
+    - Shared geometry conversions are centralized in `app/geo_utils.py`.
+    - CRUD logic is split by resource in router files under `app/routers/`.
+  - Frontend structure:
+    - Services provide a thin HTTP abstraction for each entity type.
+    - Screens are primarily responsible for UI and local state.
+  - Maintainability:
+    - `ParcelleScreen` contains large blocks of geometry logic (overlap heuristics, distance calculations, point-in-polygon) mixed with UI code.
+    - Many backend response objects are manually constructed rather than using a generic ORM serialization approach.
+- Issues:
+  - Duplication:
+    - Mapping GeoJSON ↔ `LatLng` and polygon closure logic is duplicated across multiple frontend screens/methods.
+    - Backend constructs `ForestRead`/`ParcelleRead` responses manually in several endpoints.
+  - Naming clarity:
+    - Some comments and identifiers are informal or repetitive (e.g., in `geo_utils.py` comments contain rough phrasing).
+  - Testing gaps:
+    - There are test scripts (`test_api.py`, `test_parcelle_crud.py`), but no formal unit tests for geometry validation logic or edge cases.
+  - Error handling consistency:
+    - Backend sometimes re-raises `HTTPException` and sometimes returns 500 with raw details; frontend always stringifies errors.
+- Improvements:
+  - Backend:
+    - Factor repeated response-building into helper functions.
+    - Standardize exception mapping and remove raw exception details from production responses.
+    - Replace deprecated SQLAlchemy calls with current patterns.
+  - Frontend:
+    - Extract geometry utilities (GeoJSON conversion, point-in-polygon, overlap checks) into separate helper classes/files to reduce complexity in UI widgets.
+    - Ensure consistent disposal and state transitions when switching between editing and drawing modes.
+  - Add tests:
+    - Unit tests for overlap detection and GeoJSON conversion.
+    - Backend tests verifying spatial invariants (create/update edge cases).
+
+## 7. Bugs & Risks (runtime issues, edge cases, inconsistencies)
+- Context:
+  - Code paths include polygon drawing/validation on the frontend and spatial constraint checks on the backend.
+  - Risk areas are geometry correctness, update semantics, and error/exception propagation.
+- Findings:
+  - Update semantics inconsistency:
+    - Spatial invariants are now revalidated on updates: `PUT /parcelles/{id}` enforces non-overlap/non-touch like create, and `PUT /forests/{id}` re-checks intersections.
+  - Geometry conversion sensitivity:
+    - GeoJSON payload is accepted broadly as a dict; Shapely conversion can fail if GeoJSON is malformed or ring structure differs.
+  - Area calculation sensitivity:
+    - Surface calculation uses planar area of a GeoJSON ring in degrees; for complex shapes or larger polygons, errors can be large.
+  - Spatial predicate edge cases:
+    - Forest creation uses `ST_Intersects`; depending on desired behavior, it may reject polygons that merely touch boundaries.
+  - Frontend heuristics:
+    - Overlap checks use bounding boxes + ray casting; these can produce false positives/negatives near edges, especially with concave polygons or numeric precision.
+  - Dependency risks:
+    - `EmailStr` in schemas depends on `email-validator`; not explicitly listed in `requirements.txt`.
+- Issues:
+  - Geometry error handling:
+    - Invalid/self-intersecting GeoJSON should now yield HTTP 400 (via `geo_utils.py` validation); remaining 500s are likely unexpected server/DB issues.
+  - Update operations may allow invalid domain state:
+    - Parcelle updates can create overlaps.
+    - Forest updates can create overlaps.
+  - SQLAlchemy legacy calls:
+    - Use of `.get()` through `query()` may lead to warnings or behavior differences.
+- Improvements:
+  - Implemented invariant revalidation on updates (forests and parcelles).
+  - Implemented strict backend GeoJSON validation with HTTP 400.
+  - Consider adding feature flags or config to ensure consistent “touch vs intersect” semantics across frontend/back-end.
+  - Ensure dependencies for `EmailStr` are installed (add `email-validator` to requirements or remove `EmailStr`).
+
+## 8. Missing Features (functional and technical gaps)
+- Context:
+  - The app currently supports CRUD for multiple entities and polygon drawing/management.
+- Findings:
+  - Functional gaps:
+    - Authentication and session/token management are missing; stored hashed passwords are not used.
+    - Role-based authorization is not implemented; users with any role can call all endpoints.
+    - No audit/history logs for who created/edited geometries and when.
+    - No search/filter/pagination for users/directions yet; forests/parcelles now support `skip/limit` and lightweight summary endpoints.
+    - No export/import of GeoJSON or reporting capabilities.
+  - Technical gaps:
+    - No formal database migrations tool; schema evolution is handled by runtime `ALTER TABLE IF NOT EXISTS`.
+    - GeoJSON validation is implemented for forest/parcelle polygons, but strict validation is not yet applied consistently across all API fields/endpoints.
+    - No WebSocket/real-time collaboration despite “real-time UI refresh” being performed only by reloading lists.
+- Issues:
+  - Current “security posture” is unsuitable for production (open CORS + no auth + full CRUD).
+  - Data correctness relies on application logic rather than strong schema constraints.
+- Improvements:
+  - Implement auth + role authorization checks per endpoint.
+  - Extend pagination + filtering beyond forests/parcelles (users/directions), and make the frontend prefer summary endpoints where possible.
+  - Add audit columns (`created_at`, `updated_at`, `created_by`, `updated_by`) and expose them if needed.
+  - Add migrations (Alembic) and remove/limit runtime schema alterations.
+  - Continue tightening GeoJSON schemas/validation and align frontend error UX with backend 400 responses.
+
+## 9. Performance (bottlenecks, scalability concerns)
+- Context:
+  - Performance hotspots include geometry conversion, spatial predicates, and frontend heuristic computations.
+- Findings:
+  - Backend list endpoints:
+    - `GET /forests/` and `GET /parcelles/` convert each geometry from PostGIS to GeoJSON in Python, which is expensive at scale.
+    - Pagination (`skip/limit`) is now implemented for forests/parcelles, and summary endpoints reduce payload when geometry is not needed.
+  - Backend spatial checks:
+    - Spatial predicates are now accelerated by GIST indexes on `forests.geom` and `parcelles.geom`.
+  - Frontend:
+    - Overlap checks are CPU-heavy:
+      - bounding-box checks + ray casting for points inside polygon
+      - edge touch approximations using distance computations
+    - Geometry extraction and conversion are done repeatedly during rendering and validation calls.
+- Issues:
+  - Potential latency spikes with large datasets (many forests/parcelles) and large polygon rings.
+  - High network payload:
+    - Returning full GeoJSON geometry for every item in list endpoints increases response sizes.
+  - Lack of caching:
+    - Existing forests/parcelles are loaded once per screen and used in client validation; however polygon overlap computation is repeated frequently during user taps.
+- Improvements:
+  - Extend pagination/summary patterns consistently across other list endpoints if needed.
+  - Spatial indexes are implemented; further tuning may be required based on dataset size and query patterns.
+  - Optimize backend geometry serialization:
+    - Consider returning simplified polygons for UI (or perform simplification server-side).
+  - Frontend optimization:
+    - Debounce overlap validation while drawing.
+    - Cache converted `LatLng` rings for existing polygons to avoid repeated GeoJSON-to-LatLng conversion.
+
+## 10. Recommendations (prioritized actionable steps)
+- Context:
+  - Goal is to improve security, correctness of spatial invariants, reliability of geometry handling, and scalability.
+- Findings:
+  - Highest-risk areas identified are missing auth/authz and update invariants for spatial constraints (parcelles/forests).
+  - Biggest scalability risks are geometry-heavy list endpoints when full GeoJSON is requested (payload/serialization); extend summary/pagination patterns and tune spatial indexes as datasets grow.
+- Improvements (prioritized):
+  - P0 (must-do):
+    - Implement authentication (JWT or session) and enforce role-based authorization on all CRUD endpoints.
+    - Enforce spatial invariants on update:
+      - Implemented non-overlap/non-touch checks for `PUT /parcelles/{id}` against other parcelles in the same forest.
+      - Implemented overlap re-check for `PUT /forests/{id}` against other forests (rejects on `ST_Intersects`).
+  - P1 (should-do):
+    - Add strict GeoJSON validation on the backend:
+      - verify geometry type is `Polygon` (or Feature wrapping polygon),
+      - validate coordinate structure and ring closure,
+      - reject invalid/self-intersecting geometries with 400 and clear messages.
+    - Implemented spatial indexes for `forests.geom` and `parcelles.geom` (GIST).
+    - Implemented pagination for `GET /forests/`, `GET /parcelles/`, `GET /parcelles/by_forest/{forest_id}` and added lightweight `/forests/summary` and `/parcelles/by_forest/{forest_id}/summary` endpoints (no GeoJSON payload).
+  - P2 (could-do):
+    - Improve area computation accuracy using PostGIS geography/projection rather than degree-based planar approximation.
+    - Refactor frontend geometry logic into reusable utility modules and cache computed rings.
+    - Introduce migrations (Alembic) and remove runtime `ALTER TABLE IF NOT EXISTS` patterns once migration history is established.
+  - P3 (later):
+    - Add audit fields and optional export/reporting endpoints (GeoJSON export, exports per forest/parcelle set).
+    - Add unit/integration tests for spatial validation edge cases and geometry parsing failures.
+

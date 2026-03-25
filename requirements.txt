@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+SQLAlchemy
+psycopg2-binary
+geoalchemy2
+shapely
+pydantic-settings
+python-multipart
+passlib
