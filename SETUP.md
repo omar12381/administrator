@@ -192,6 +192,22 @@ d:\user_management/
 
 ---
 
+## Publier sur GitHub (versionnage)
+
+Le dépôt Git local est initialisé sur la branche `main` avec un premier commit. Pour pousser vers GitHub :
+
+1. Créez un dépôt **public** vide sur [github.com](https://github.com/new) (sans README ni `.gitignore` générés par GitHub, pour éviter un conflit au premier push).
+2. Dans PowerShell, depuis `D:\user_management` :
+
+```powershell
+git remote add origin https://github.com/VOTRE_UTILISATEUR/NOM_DU_REPO.git
+git push -u origin main
+```
+
+3. Authentification : utilisez un **Personal Access Token** (HTTPS) ou configurez Git Credential Manager. Si `origin` existe déjà : `git remote set-url origin <URL>` puis `git push -u origin main`.
+
+---
+
 ## Support Files
 
 - **EXPLICATION_PROJET.md** - Detailed explanation of backend architecture
