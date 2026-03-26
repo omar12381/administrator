@@ -31,6 +31,7 @@ def create_user(user_in: schemas.UserCreate, db: Session = Depends(get_db)):
         hashed_password=hash_password(user_in.password),
         role_id=user_in.role_id,
         direction_secondaire_id=user_in.direction_secondaire_id,
+        direction_regionale_id=user_in.direction_regionale_id,
         telephone=user_in.telephone,
         actif=user_in.actif if user_in.actif is not None else True,
     )

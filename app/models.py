@@ -24,11 +24,13 @@ class User(Base):
     role_id = Column(Integer, ForeignKey("roles.id"), nullable=False)
 
     direction_secondaire_id = Column(Integer, ForeignKey("direction_secondaire.id"), nullable=True, index=True)
+    direction_regionale_id = Column(Integer, ForeignKey("direction_regionale.id"), nullable=True, index=True)
     telephone = Column(String, nullable=True)
     actif = Column(Boolean, default=True, nullable=False)
 
     role = relationship("Role", back_populates="users")
     direction_secondaire = relationship("DirectionSecondaire", back_populates="superviseurs")
+    direction_regionale = relationship("DirectionRegionale")
 
 
 class DirectionRegionale(Base):

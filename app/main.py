@@ -5,7 +5,7 @@ from sqlalchemy import text
 from .db import engine, Base
 from . import models  # noqa: F401
 from .routers import users, forests, parcelles, roles
-from .routers import directions_regionales, directions_secondaires
+from .routers.directions import router_regionales, router_secondaires
 
 
 app = FastAPI(title="User & Forest Management API")
@@ -35,22 +35,25 @@ def on_startup():
             {"names": ["admin", "agent_forestier", "superviseur"]},
         )
 
-        # Évolutions de schéma ponctuelles si la base est plus ancienne
-        conn.execute(
-            text(
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS direction_secondaire_id INTEGER REFERENCES direction_secondaire(id),"
-                " ADD COLUMN IF NOT EXISTS telephone VARCHAR(50),"
-                " ADD COLUMN IF NOT EXISTS actif BOOLEAN NOT NULL DEFAULT TRUE"
-            )
-        )
-        conn.execute(
-            text(
-                "ALTER TABLE forests ADD COLUMN IF NOT EXISTS direction_secondaire_id INTEGER REFERENCES direction_secondaire(id)"
-            )
-        )
+    # Évolutions de schéma ponctuelles — chaque instruction dans sa propre
+    # transaction pour qu'un échec isolé ne bloque pas les autres.
+    _migrations = [
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS direction_secondaire_id INTEGER REFERENCES direction_secondaire(id)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS telephone VARCHAR(50)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS actif BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS direction_regionale_id INTEGER REFERENCES direction_regionale(id)",
+        "ALTER TABLE forests ADD COLUMN IF NOT EXISTS direction_secondaire_id INTEGER REFERENCES direction_secondaire(id)",
+    ]
+    for _sql in _migrations:
+        try:
+            with engine.begin() as _conn:
+                _conn.execute(text(_sql))
+        except Exception:
+            pass  # colonne déjà présente ou erreur non bloquante
 
-        # Spatial indexes (PostGIS geometry).
-        # These improve performance for ST_Intersects/ST_Contains/ST_Disjoint queries.
+    # Spatial indexes (PostGIS geometry).
+    # These improve performance for ST_Intersects/ST_Contains/ST_Disjoint queries.
+    with engine.begin() as conn:
         conn.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS ix_forests_geom ON forests USING GIST (geom)"
@@ -67,6 +70,6 @@ app.include_router(roles.router, prefix="/roles", tags=["roles"])
 app.include_router(users.router, prefix="/users", tags=["users"])
 app.include_router(forests.router, prefix="/forests", tags=["forests"])
 app.include_router(parcelles.router, prefix="/parcelles", tags=["parcelles"])
-app.include_router(directions_regionales.router, prefix="/directions-regionales", tags=["directions"])
-app.include_router(directions_secondaires.router, prefix="/directions-secondaires", tags=["directions"])
+app.include_router(router_regionales, prefix="/directions-regionales", tags=["directions"])
+app.include_router(router_secondaires, prefix="/directions-secondaires", tags=["directions"])
 

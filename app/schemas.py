@@ -29,6 +29,7 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     password: str
     direction_secondaire_id: Optional[int] = None
+    direction_regionale_id: Optional[int] = None
     telephone: Optional[str] = None
     actif: bool = True
 
@@ -49,6 +50,7 @@ class UserRead(BaseModel):
     email: EmailStr
     role: RoleRead
     direction_secondaire_id: Optional[int] = None
+    direction_regionale_id: Optional[int] = None
     telephone: Optional[str] = None
     actif: bool = True
 
