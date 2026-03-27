@@ -71,6 +71,7 @@ class ForestBase(BaseModel):
 class ForestCreate(ForestBase):
     created_by_id: Optional[int] = None
     direction_secondaire_id: Optional[int] = None
+    direction_regionale_id: Optional[int] = None
     surface_ha: Optional[float] = None
     type_foret: Optional[str] = None
 
@@ -90,6 +91,7 @@ class ForestRead(BaseModel):
     description: Optional[str]
     geometry: Dict[str, Any]
     direction_secondaire_id: Optional[int] = None
+    direction_regionale_id: Optional[int] = None
     surface_ha: Optional[float] = None
     type_foret: Optional[str] = None
 

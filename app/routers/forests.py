@@ -34,6 +34,7 @@ def create_forest(forest_in: schemas.ForestCreate, db: Session = Depends(get_db)
         geom=geom,
         created_by_id=forest_in.created_by_id,
         direction_secondaire_id=forest_in.direction_secondaire_id,
+        direction_regionale_id=forest_in.direction_regionale_id,
         surface_ha=forest_in.surface_ha,
         type_foret=forest_in.type_foret,
     )
@@ -47,6 +48,7 @@ def create_forest(forest_in: schemas.ForestCreate, db: Session = Depends(get_db)
         description=db_forest.description,
         geometry=geometry_to_geojson(db_forest.geom),
         direction_secondaire_id=db_forest.direction_secondaire_id,
+        direction_regionale_id=db_forest.direction_regionale_id,
         surface_ha=db_forest.surface_ha,
         type_foret=db_forest.type_foret,
     )
@@ -62,6 +64,7 @@ def list_forests(skip: int = 0, limit: int = 1000, db: Session = Depends(get_db)
             description=f.description,
             geometry=geometry_to_geojson(f.geom),
             direction_secondaire_id=f.direction_secondaire_id,
+            direction_regionale_id=f.direction_regionale_id,
             surface_ha=f.surface_ha,
             type_foret=f.type_foret,
         )
@@ -104,6 +107,7 @@ def get_forest(forest_id: int, db: Session = Depends(get_db)):
         description=forest.description,
         geometry=geometry_to_geojson(forest.geom),
         direction_secondaire_id=forest.direction_secondaire_id,
+        direction_regionale_id=forest.direction_regionale_id,
         surface_ha=forest.surface_ha,
         type_foret=forest.type_foret,
     )
@@ -153,6 +157,7 @@ def update_forest(forest_id: int, forest_in: schemas.ForestUpdate, db: Session =
         description=forest.description,
         geometry=geometry_to_geojson(forest.geom),
         direction_secondaire_id=forest.direction_secondaire_id,
+        direction_regionale_id=forest.direction_regionale_id,
         surface_ha=forest.surface_ha,
         type_foret=forest.type_foret,
     )

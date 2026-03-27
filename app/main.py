@@ -43,6 +43,7 @@ def on_startup():
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS actif BOOLEAN NOT NULL DEFAULT TRUE",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS direction_regionale_id INTEGER REFERENCES direction_regionale(id)",
         "ALTER TABLE forests ADD COLUMN IF NOT EXISTS direction_secondaire_id INTEGER REFERENCES direction_secondaire(id)",
+        "ALTER TABLE forests ADD COLUMN IF NOT EXISTS direction_regionale_id INTEGER REFERENCES direction_regionale(id)",
     ]
     for _sql in _migrations:
         try:

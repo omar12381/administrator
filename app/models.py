@@ -76,9 +76,11 @@ class Forest(Base):
     created_by = relationship("User")
 
     direction_secondaire_id = Column(Integer, ForeignKey("direction_secondaire.id"), nullable=True, index=True)
+    direction_regionale_id = Column(Integer, ForeignKey("direction_regionale.id"), nullable=True, index=True)
     surface_ha = Column(Float, nullable=True)
     type_foret = Column(String, nullable=True)
     direction_secondaire = relationship("DirectionSecondaire", back_populates="forests")
+    direction_regionale = relationship("DirectionRegionale")
 
     parcelles = relationship("Parcelle", back_populates="forest", cascade="all, delete-orphan")
 
